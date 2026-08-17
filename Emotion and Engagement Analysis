@@ -1,0 +1,108 @@
+# Hello! I'm Guney, this is my code that analyses emotional tone and asks whether or not it predicts engagement.
+# This is a emotion analysis pipeline that can be used for reviews and social posts.
+# The parts from 1-5 can be used on its own for a descriptive VADER anaylsis, but if you wantt to know the outcome for an engagement analysis, keep using the other steps as well.
+# Don't forget to seperate the blocks and ONLY USE IMPORTS ONCE.
+
+# Arrange the information below into a csv file:
+# text = the review/ad/post text
+# rating = a numeric outcome (star rating, engagement count, helpfulness votes, etc.)
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from transformers import pipeline
+from scipy.stats import pearsonr
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, classification_report
+
+# ---------------------------------------------------------------------------
+# 1. Load your data
+# Replace reviews.csv with your csv file, obviously
+
+DATA_PATH = "reviews.csv" 
+df = pd.read_csv(DATA_PATH)
+df = df.dropna(subset=["text", "rating"]).reset_index(drop=True)
+
+# Don't forget to keep emojis / punctuation 
+df["text"] = df["text"].astype(str).str.strip()
+df["text_length"] = df["text"].str.len()
+
+# ---------------------------------------------------------------------------
+# 2. Lexicon-based sentiment (VADER) 
+
+vader = SentimentIntensityAnalyzer()
+df["vader_compound"] = df["text"].apply(lambda t: vader.polarity_scores(t)["compound"])
+
+# ---------------------------------------------------------------------------
+# 3. Model-based discrete emotion (valence + arousal proxy)
+
+emotion_clf = pipeline(
+    "text-classification",
+    model="j-hartmann/emotion-english-distilroberta-base",
+    top_k=1,
+    truncation=True,
+)
+
+def get_top_emotion(text):
+    result = emotion_clf(text[:512])[0][0]  # truncate long text for speed
+    return result["label"], result["score"]
+
+emotions = df["text"].apply(get_top_emotion)
+df["emotion"] = emotions.apply(lambda x: x[0])
+df["emotion_score"] = emotions.apply(lambda x: x[1])
+
+# rough arousal grouping 
+HIGH_AROUSAL = {"anger", "fear", "joy", "surprise"}
+df["arousal"] = df["emotion"].apply(lambda e: "high" if e in HIGH_AROUSAL else "low")
+
+# ---------------------------------------------------------------------------
+# 4. Statistical test: does sentiment/emotion predict the outcome?
+
+r, p = pearsonr(df["vader_compound"], df["rating"])
+print(f"VADER compound vs rating: r={r:.3f}, p={p:.4f}")
+
+print("\nMean rating by discrete emotion:")
+print(df.groupby("emotion")["rating"].mean().sort_values(ascending=False))
+
+print("\nMean rating by arousal level:")
+print(df.groupby("arousal")["rating"].mean())
+
+# ---------------------------------------------------------------------------
+# 5. Visual chart
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+sns.barplot(data=df, x="emotion", y="rating", ax=axes[0], errorbar="ci")
+axes[0].set_title("Mean Rating by Discrete Emotion")
+axes[0].tick_params(axis="x", rotation=45)
+
+sns.scatterplot(data=df, x="vader_compound", y="rating", alpha=0.4, ax=axes[1])
+axes[1].set_title("VADER Sentiment vs Rating")
+
+plt.tight_layout()
+plt.savefig("emotion_analysis.png", dpi=150)
+plt.show()
+
+# ---------------------------------------------------------------------------
+# 6. Predictive model: emotion + text length = high vs low outcome
+
+df["high_outcome"] = (df["rating"] >= df["rating"].median()).astype(int)
+
+features = pd.get_dummies(df[["vader_compound", "text_length", "emotion"]], columns=["emotion"])
+X_train, X_test, y_train, y_test = train_test_split(
+    features, df["high_outcome"], test_size=0.25, random_state=42
+)
+
+clf = LogisticRegression(max_iter=1000)
+clf.fit(X_train, y_train)
+probs = clf.predict_proba(X_test)[:, 1]
+
+print(f"\nROC-AUC: {roc_auc_score(y_test, probs):.3f}")
+print(classification_report(y_test, clf.predict(X_test)))
+
+# ---------------------------------------------------------------------------
+# Note: In analysis, don't forget to control for text_length since longer text often correlates with engagement.
+# Feel free to add anything and modify it to your liking.
